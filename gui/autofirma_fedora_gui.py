@@ -902,8 +902,8 @@ class App(QWidget):
                 "curl --fail --location --proto '=https' --tlsv1.2 --max-time 30 "
                 "-H 'Accept: application/vnd.github+json' "
                 "'https://api.github.com/repos/ctt-gob-es/clienteafirma/tags?per_page=15' "
-                "| grep -E '\\"name\\": \\"v[0-9]' "
-                "| sed -E 's/.*\\"name\\": \\"([^\\"]+).*/\\1/'",
+                "| grep -oE '\"name\": \"v[0-9][^\"]*' "
+                "| sed -E 's/.*\"name\": \"([^\"]+).*/\\1/'",
             ],
         )
 
