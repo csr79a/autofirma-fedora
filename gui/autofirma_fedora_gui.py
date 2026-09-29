@@ -219,10 +219,14 @@ def chromium_nss_dirs() -> list[Path]:
 
 
 def find_autofirma_root() -> Path | None:
+    # AutoFirma genera su CA local en el perfil del usuario al inicializarse.
+    # El RPM Fedora instala la aplicación en %{_libdir}/autofirma.
     candidates = [
-        Path("/usr/lib/AutoFirma") / AUTOFIRMA_ROOT_NAME,
-        Path("/usr/lib64/AutoFirma") / AUTOFIRMA_ROOT_NAME,
+        Path.home() / ".afirma" / "Autofirma" / AUTOFIRMA_ROOT_NAME,
+        Path("/usr/lib64/autofirma") / AUTOFIRMA_ROOT_NAME,
         Path("/usr/lib/autofirma") / AUTOFIRMA_ROOT_NAME,
+        Path("/usr/lib64/AutoFirma") / AUTOFIRMA_ROOT_NAME,
+        Path("/usr/lib/AutoFirma") / AUTOFIRMA_ROOT_NAME,
         Path("/usr/share/AutoFirma") / AUTOFIRMA_ROOT_NAME,
     ]
     if shutil.which("rpm"):
@@ -248,6 +252,30 @@ def find_autofirma_executable() -> str | None:
     for path in ("/usr/bin/autofirma", "/usr/local/bin/autofirma"):
         if Path(path).is_file() and os.access(path, os.X_OK):
             return path
+    return None
+
+
+def find_autofirma_install_dir() -> Path | None:
+    if not have("rpm"):
+        return None
+    try:
+        p = run_capture(["rpm", "-ql", "autofirma"])
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode:
+        return None
+    for line in p.stdout.splitlines():
+        path = Path(line.strip())
+        if path.name == "autofirma.jar" and path.parent.is_dir():
+            return path.parent
+    for candidate in (
+        Path("/usr/lib64/autofirma"),
+        Path("/usr/lib/autofirma"),
+        Path("/usr/lib64/AutoFirma"),
+        Path("/usr/lib/AutoFirma"),
+    ):
+        if candidate.is_dir():
+            return candidate
     return None
 
 
@@ -581,6 +609,8 @@ class App(QWidget):
 
         if not NSS_DIR.exists():
             try:
+                NSS_DIR.parent.mkdir(parents=True, exist_ok=True)
+                os.chmod(NSS_DIR.parent, 0o700)
                 p = subprocess.run(
                     ["certutil", "-N", "-d", f"sql:{NSS_DIR}", "--empty-password"],
                     text=True,
@@ -768,6 +798,8 @@ class App(QWidget):
 
         executable = find_autofirma_executable()
         self.write(f"Ejecutable AutoFirma: {executable or 'NO ENCONTRADO'}")
+        install_dir = find_autofirma_install_dir()
+        self.write(f"Directorio AutoFirma: {install_dir or 'NO ENCONTRADO'}")
 
         if have("rpm"):
             try:
