@@ -631,6 +631,33 @@ class App(QWidget):
                 self.write(f"ADVERTENCIA: no se pudo aplicar chmod 700: {exc}")
 
             self.write(f"NSS creado: {NSS_DIR} (contraseña vacía)")
+        elif not (NSS_DIR / "cert9.db").exists():
+            try:
+                entries = list(NSS_DIR.iterdir())
+            except OSError as exc:
+                self.write(f"ERROR leyendo NSS: {exc}")
+                return
+            if entries:
+                self.write(
+                    f"ERROR: {NSS_DIR} existe pero no contiene cert9.db y tiene otros datos. "
+                    "No se modifica por seguridad."
+                )
+                return
+            try:
+                p = subprocess.run(
+                    ["certutil", "-N", "-d", f"sql:{NSS_DIR}", "--empty-password"],
+                    text=True,
+                    capture_output=True,
+                    timeout=30,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                self.write(f"ERROR inicializando NSS vacío: {exc}")
+                return
+            if p.returncode:
+                self.write("ERROR inicializando NSS: " + (p.stderr or p.stdout).strip())
+                return
+            os.chmod(NSS_DIR, 0o700)
+            self.write(f"NSS inicializado: {NSS_DIR} (contraseña vacía)")
         else:
             self.write(f"NSS ya existe: {NSS_DIR}")
             self.write("No se recrea, no se borra y no se modifica.")
@@ -651,9 +678,9 @@ class App(QWidget):
             )
             return
 
-        if not NSS_DIR.exists():
+        if not NSS_DIR.exists() or not (NSS_DIR / "cert9.db").exists():
             self.nss_check()
-        if not NSS_DIR.exists():
+        if not NSS_DIR.exists() or not (NSS_DIR / "cert9.db").exists():
             return
 
         path, _ = QFileDialog.getOpenFileName(
@@ -842,10 +869,13 @@ class App(QWidget):
                 "bash",
                 "-lc",
                 "set -o pipefail; "
+                "command -v curl >/dev/null || { echo 'ERROR: falta curl.'; exit 1; }; "
                 "echo 'Tags recientes de clienteafirma:'; "
-                "git ls-remote --tags "
-                "https://github.com/ctt-gob-es/clienteafirma.git "
-                "| grep -v '\\^{}' | tail -15",
+                "curl --fail --location --proto '=https' --tlsv1.2 --max-time 30 "
+                "-H 'Accept: application/vnd.github+json' "
+                "'https://api.github.com/repos/ctt-gob-es/clienteafirma/tags?per_page=15' "
+                "| grep -E '\\"name\\": \\"v[0-9]' "
+                "| sed -E 's/.*\\"name\\": \\"([^\\"]+).*/\\1/'",
             ],
         )
 
