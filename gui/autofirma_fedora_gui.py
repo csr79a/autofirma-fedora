@@ -10,14 +10,13 @@ Arquitectura:
 - tarjetas de acciones
 - NSS conservador: no recrea ni borra almacenes existentes
 - importación PKCS#12 con contraseña por stdin, nunca por argv/archivo temporal
-- protección por huella SHA-256 al instalar AutoFirma ROOT
+- la confianza de AutoFirma ROOT la gestiona el propio RPM (autofirmaConfigurador.jar -install)
 """
 
 from __future__ import annotations
 
 import os
 import re
-import select
 import shutil
 import signal
 import subprocess
@@ -50,8 +49,6 @@ _system_root = Path("/usr/share/autofirma-fedora")
 ROOT = _repo_root if (_repo_root / "instalar_autofirma.sh").is_file() else _system_root
 INSTALLER = ROOT / "instalar_autofirma.sh"
 NSS_DIR = Path.home() / ".pki" / "nssdb"
-AUTOFIRMA_ROOT_NAME = "AutoFirma_ROOT.cer"
-AUTOFIRMA_NICKNAME = "AutoFirma ROOT"
 
 ANSI_RE = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))"
@@ -72,28 +69,27 @@ def have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-def sha256_cert(path: Path) -> str | None:
-    try:
-        p = run_capture(
-            ["openssl", "x509", "-in", str(path), "-noout", "-fingerprint", "-sha256"]
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if p.returncode:
-        return None
-    return (
-        p.stdout.strip()
-        .replace("SHA256 Fingerprint=", "")
-        .replace("sha256 Fingerprint=", "")
-    )
-
-
 def nss_certificates(db: Path):
     try:
         p = run_capture(["certutil", "-L", "-d", f"sql:{db}"])
     except (OSError, subprocess.SubprocessError) as exc:
         return 1, "", str(exc)
     return p.returncode, p.stdout, p.stderr
+
+
+NICK_RE = re.compile(r"^(?P<nick>.*\S)\s+(?P<trust>[pPcCTu,]+)\s*$")
+
+
+def nss_nicknames(listing: str) -> list[str]:
+    """Extrae los nicknames de `certutil -L`, respetando los que llevan espacios."""
+    result = []
+    for line in listing.splitlines():
+        if not line.strip() or line.lstrip().startswith(("Certificate Nickname", "SSL,")):
+            continue
+        m = NICK_RE.match(line.rstrip())
+        if m:
+            result.append(m.group("nick").strip())
+    return result
 
 
 def nss_fingerprint(db: Path, nickname: str) -> str | None:
@@ -122,41 +118,34 @@ def nss_fingerprint(db: Path, nickname: str) -> str | None:
 
 
 def pkcs12_fingerprint(path: Path, password: str) -> str | None:
-    try:
-        p = subprocess.run(
-            [
-                "openssl",
-                "pkcs12",
-                "-in",
-                str(path),
-                "-clcerts",
-                "-nokeys",
-                "-passin",
-                "stdin",
-            ],
-            input=password,
-            text=True,
-            capture_output=True,
-            timeout=60,
-        )
-        if p.returncode:
-            return None
-        q = subprocess.run(
-            ["openssl", "x509", "-noout", "-fingerprint", "-sha256"],
-            input=p.stdout,
-            text=True,
-            capture_output=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if q.returncode:
-        return None
-    return (
-        q.stdout.strip()
-        .replace("SHA256 Fingerprint=", "")
-        .replace("sha256 Fingerprint=", "")
-    )
+    base = ["openssl", "pkcs12", "-in", str(path), "-clcerts", "-nokeys", "-passin", "stdin"]
+    for extra in ([], ["-legacy"]):
+        try:
+            p = subprocess.run(
+                base + extra,
+                input=password + "\n",
+                text=True,
+                capture_output=True,
+                timeout=60,
+            )
+            if p.returncode:
+                continue
+            q = subprocess.run(
+                ["openssl", "x509", "-noout", "-fingerprint", "-sha256"],
+                input=p.stdout,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if q.returncode == 0:
+            return (
+                q.stdout.strip()
+                .replace("SHA256 Fingerprint=", "")
+                .replace("sha256 Fingerprint=", "")
+            )
+    return None
 
 
 def firefox_profiles() -> list[Path]:
@@ -207,52 +196,17 @@ def firefox_profiles() -> list[Path]:
     return list(dict.fromkeys(result))
 
 
-def chromium_nss_dirs() -> list[Path]:
-    result = []
-    candidates = [
-        Path.home() / ".pki" / "nssdb",
-        Path.home() / ".config" / "google-chrome",
-        Path.home() / ".config" / "chromium",
-        Path.home() / ".config" / "BraveSoftware" / "Brave-Browser",
-    ]
-    for p in candidates:
-        if p.is_dir() and (p / "cert9.db").exists():
-            result.append(p)
-    return list(dict.fromkeys(result))
-
-
-def find_autofirma_root() -> Path | None:
-    # AutoFirma genera su CA local en el perfil del usuario al inicializarse.
-    # El RPM Fedora instala la aplicación en %{_libdir}/autofirma.
-    candidates = [
-        Path.home() / ".afirma" / "Autofirma" / AUTOFIRMA_ROOT_NAME,
-        Path("/usr/lib64/autofirma") / AUTOFIRMA_ROOT_NAME,
-        Path("/usr/lib/autofirma") / AUTOFIRMA_ROOT_NAME,
-        Path("/usr/lib64/AutoFirma") / AUTOFIRMA_ROOT_NAME,
-        Path("/usr/lib/AutoFirma") / AUTOFIRMA_ROOT_NAME,
-        Path("/usr/share/AutoFirma") / AUTOFIRMA_ROOT_NAME,
-    ]
-    if shutil.which("rpm"):
-        try:
-            p = run_capture(["rpm", "-ql", "autofirma"])
-            if p.returncode == 0:
-                for line in p.stdout.splitlines():
-                    candidate = Path(line.strip())
-                    if candidate.name == AUTOFIRMA_ROOT_NAME and candidate.is_file():
-                        candidates.insert(0, candidate)
-        except (OSError, subprocess.SubprocessError):
-            pass
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None
-
-
 def find_autofirma_executable() -> str | None:
-    direct = shutil.which("autofirma")
-    if direct:
-        return direct
-    for path in ("/usr/bin/autofirma", "/usr/local/bin/autofirma"):
+    for name in ("autofirma", "AutoFirma"):
+        direct = shutil.which(name)
+        if direct:
+            return direct
+    for path in (
+        "/usr/bin/autofirma",
+        "/usr/bin/AutoFirma",
+        "/usr/local/bin/autofirma",
+        "/usr/local/bin/AutoFirma",
+    ):
         if Path(path).is_file() and os.access(path, os.X_OK):
             return path
     return None
@@ -282,7 +236,7 @@ def find_autofirma_install_dir() -> Path | None:
         return None
     for line in p.stdout.splitlines():
         path = Path(line.strip())
-        if path.name == "autofirma.jar" and path.parent.is_dir():
+        if path.name.lower() == "autofirma.jar" and path.parent.is_dir():
             return path.parent
     for candidate in (
         Path("/usr/lib64/autofirma"),
@@ -293,68 +247,6 @@ def find_autofirma_install_dir() -> Path | None:
         if candidate.is_dir():
             return candidate
     return None
-
-
-def trust_root_in_db(db: Path, cert_path: Path):
-    fingerprint = sha256_cert(cert_path)
-    if not fingerprint:
-        return False, f"{db}: no se pudo leer la huella SHA-256 del ROOT."
-
-    existing = nss_fingerprint(db, AUTOFIRMA_NICKNAME)
-
-    if existing and existing == fingerprint:
-        try:
-            p = run_capture(
-                [
-                    "certutil",
-                    "-M",
-                    "-d",
-                    f"sql:{db}",
-                    "-n",
-                    AUTOFIRMA_NICKNAME,
-                    "-t",
-                    "C,,",
-                ]
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            return False, f"{db}: no se pudo actualizar la confianza: {exc}"
-        if p.returncode:
-            return False, f"{db}: {p.stderr.strip() or p.stdout.strip()}"
-        if nss_fingerprint(db, AUTOFIRMA_NICKNAME) != fingerprint:
-            return False, f"{db}: la huella cambió después de actualizar la confianza."
-        return True, f"{db}: AutoFirma ROOT ya estaba instalado y verificado."
-
-    if existing:
-        return False, (
-            f"{db}: ya existe «{AUTOFIRMA_NICKNAME}» con otra huella SHA-256. "
-            "No se modifica por seguridad."
-        )
-
-    try:
-        p = run_capture(
-            [
-                "certutil",
-                "-A",
-                "-d",
-                f"sql:{db}",
-                "-n",
-                AUTOFIRMA_NICKNAME,
-                "-t",
-                "C,,",
-                "-i",
-                str(cert_path),
-            ]
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"{db}: no se pudo importar AutoFirma ROOT: {exc}"
-
-    if p.returncode:
-        return False, f"{db}: {p.stderr.strip() or p.stdout.strip()}"
-
-    if nss_fingerprint(db, AUTOFIRMA_NICKNAME) != fingerprint:
-        return False, f"{db}: importación realizada, pero la huella no coincide."
-
-    return True, f"{db}: AutoFirma ROOT importado y verificado (C,,)."
 
 
 class PtyRunner:
@@ -372,33 +264,36 @@ class PtyRunner:
 
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            os.execvp(self.command[0], self.command)
+            try:
+                os.execvp(self.command[0], self.command)
+            finally:
+                os._exit(127)  # nunca volver al código Qt del proceso hijo
         os.set_blocking(self.fd, False)
+
+    def _drain(self):
+        """Lee todo lo pendiente del PTY para no perder las últimas líneas."""
+        while self.fd is not None:
+            try:
+                data = os.read(self.fd, 16384)
+            except BlockingIOError:
+                return
+            except OSError:
+                return  # EIO: el hijo cerró el PTY
+            if not data:
+                return
+            self.on_output(data.decode("utf-8", "replace"))
 
     def poll(self):
         if self.finished or self.fd is None:
             return
+        self._drain()
         try:
-            ready, _, _ = select.select([self.fd], [], [], 0)
-            if ready:
-                data = os.read(self.fd, 16384)
-                if data:
-                    self.on_output(data.decode("utf-8", "replace"))
-                else:
-                    self.finish()
-                    return
-        except (OSError, EOFError):
-            self.finish()
-            return
-
-        if self.pid:
-            try:
-                done, status = os.waitpid(self.pid, os.WNOHANG)
-            except ChildProcessError:
-                done = self.pid
-                status = 0
-            if done:
-                self.finish(os.waitstatus_to_exitcode(status) if status else 0)
+            done, status = os.waitpid(self.pid, os.WNOHANG)
+        except ChildProcessError:
+            done, status = self.pid, 0
+        if done:
+            self._drain()
+            self.finish(os.waitstatus_to_exitcode(status))
 
     def send(self, text: str):
         if self.fd is not None:
@@ -418,29 +313,17 @@ class PtyRunner:
             pass
         self.last_cancel = now
 
-    def finish(self, code: int | None = None):
+    def finish(self, code: int):
         if self.finished:
             return
         self.finished = True
-
-        fd = self.fd
-        pid = self.pid
-        self.fd = None
-
+        fd, self.fd = self.fd, None
         if fd is not None:
             try:
                 os.close(fd)
             except OSError:
                 pass
-
-        if code is None and pid:
-            try:
-                _, status = os.waitpid(pid, os.WNOHANG)
-                code = os.waitstatus_to_exitcode(status) if status else 130
-            except (OSError, ChildProcessError):
-                code = 130
-
-        self.on_done(code if code is not None else 0)
+        self.on_done(code)
 
 
 class App(QWidget):
@@ -462,7 +345,7 @@ class App(QWidget):
         root.addWidget(title)
 
         subtitle = QLabel(
-            "Instalación RPM oficial · NSS · certificados · navegadores · estado"
+            "Instalación RPM oficial · certificados · estado"
         )
         root.addWidget(subtitle)
 
@@ -470,14 +353,11 @@ class App(QWidget):
         root.addLayout(grid)
 
         cards = [
-            ("1. AutoFirma", "Instalar / reinstalar el RPM oficial", self.install),
+            ("1. Instalar / actualizar", "Instala o reinstala el RPM oficial (verifica SHA-256)", self.install),
             ("2. Lanzar AutoFirma", "Abrir AutoFirma instalada", self.launch),
             ("3. NSS", "Crear o comprobar ~/.pki/nssdb", self.nss_check),
-            ("4. Certificado", "Importar certificado .p12 / .pfx", self.import_cert),
-            ("5. Navegadores", "Confiar en AutoFirma ROOT", self.trust_browsers),
-            ("6. Estado", "Comprobar instalación e integración", self.status),
-            ("7. Versiones", "Consultar versiones oficiales", self.versions),
-            ("8. Actualizar", "Volver a instalar la versión oficial fijada", self.update),
+            ("4. Certificado", "Importar certificado personal .p12 / .pfx", self.import_cert),
+            ("5. Estado", "Comprobar instalación e integración", self.status),
         ]
 
         for i, (head, desc, fn) in enumerate(cards):
@@ -526,6 +406,12 @@ class App(QWidget):
 
     def write(self, text: str):
         clean = ANSI_RE.sub("", text).replace("\r", "\n")
+        if self.runner:
+            tail = clean.rstrip().lower()
+            asks_secret = bool(re.search(r"(contraseña|password)[^\n]*:$", tail))
+            self.input.setEchoMode(
+                QLineEdit.EchoMode.Password if asks_secret else QLineEdit.EchoMode.Normal
+            )
         if clean.strip():
             self.log.appendPlainText(clean.rstrip("\n"))
             self.log.ensureCursorVisible()
@@ -562,6 +448,7 @@ class App(QWidget):
         self.timer.stop()
         self.progress.hide()
         self.cancel_button.setEnabled(False)
+        self.input.setEchoMode(QLineEdit.EchoMode.Normal)
         self.write(f"=== Proceso terminado: código {code} ===")
         self.runner = None
 
@@ -583,29 +470,6 @@ class App(QWidget):
             "Instalar / reinstalar AutoFirma",
             ["bash", str(INSTALLER)],
         )
-
-    def update(self):
-        self.write("\n=== Actualizar AutoFirma ===")
-        installed = installed_autofirma_version()
-        target = "1.9"
-        if installed == target:
-            self.write(
-                f"AutoFirma {installed} ya coincide con la versión fijada oficialmente ({target})."
-            )
-            self.write(
-                "No se reinstala innecesariamente. Usa «1. AutoFirma» si quieres "
-                "forzar una reinstalación."
-            )
-            return
-        if installed:
-            self.write(f"Versión instalada: {installed}")
-            self.write(f"Versión objetivo del instalador: {target}")
-        else:
-            self.write("AutoFirma no está instalada o no se pudo consultar el RPM.")
-        self.write(
-            "Se ejecutará el instalador oficial, que verifica SHA-256 antes de instalar."
-        )
-        self.install()
 
     def launch(self):
         executable = find_autofirma_executable()
@@ -641,7 +505,7 @@ class App(QWidget):
         if not NSS_DIR.exists():
             try:
                 NSS_DIR.parent.mkdir(parents=True, exist_ok=True)
-                os.chmod(NSS_DIR.parent, 0o700)
+                NSS_DIR.mkdir(mode=0o700)  # certutil -N no crea el directorio
                 p = subprocess.run(
                     ["certutil", "-N", "-d", f"sql:{NSS_DIR}", "--empty-password"],
                     text=True,
@@ -655,11 +519,6 @@ class App(QWidget):
             if p.returncode:
                 self.write("ERROR creando NSS: " + (p.stderr or p.stdout).strip())
                 return
-
-            try:
-                os.chmod(NSS_DIR, 0o700)
-            except OSError as exc:
-                self.write(f"ADVERTENCIA: no se pudo aplicar chmod 700: {exc}")
 
             self.write(f"NSS creado: {NSS_DIR} (contraseña vacía)")
         elif not (NSS_DIR / "cert9.db").exists():
@@ -734,14 +593,13 @@ class App(QWidget):
         self.write(f"Comprobando certificado: {cert.name}")
 
         fingerprint = pkcs12_fingerprint(cert, password)
-        if not fingerprint:
+        if fingerprint:
+            self.write("Huella SHA-256: " + fingerprint)
+        else:
             self.write(
-                "ERROR: no se pudo leer el certificado del PKCS#12. "
-                "Comprueba la contraseña y el archivo."
+                "ADVERTENCIA: no se pudo calcular la huella con openssl "
+                "(contraseña incorrecta o formato antiguo). pk12util validará el archivo."
             )
-            return
-
-        self.write("Huella SHA-256: " + fingerprint)
 
         rc, listing, err = nss_certificates(NSS_DIR)
         if rc:
@@ -749,17 +607,13 @@ class App(QWidget):
             self.write(err.strip())
             return
 
-        for line in listing.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.lower().startswith("certificate"):
-                continue
-            nickname = stripped.split()[0]
-            existing = nss_fingerprint(NSS_DIR, nickname)
-            if existing == fingerprint:
-                self.write(
-                    f"El certificado ya está presente en NSS como «{nickname}»."
-                )
-                return
+        if fingerprint:
+            for nickname in nss_nicknames(listing):
+                if nss_fingerprint(NSS_DIR, nickname) == fingerprint:
+                    self.write(
+                        f"El certificado ya está presente en NSS como «{nickname}»."
+                    )
+                    return
 
         self.write(f"Importando certificado personal: {cert.name}")
         try:
@@ -801,51 +655,6 @@ class App(QWidget):
             QLineEdit.EchoMode.Password,
         )
 
-    def trust_browsers(self):
-        if not have("certutil"):
-            QMessageBox.critical(
-                self,
-                "Falta NSS",
-                "No está disponible certutil. Ejecuta «1. AutoFirma».",
-            )
-            return
-
-        root = find_autofirma_root()
-        if not root:
-            QMessageBox.warning(
-                self,
-                "AutoFirma ROOT no encontrado",
-                "No se encontró AutoFirma_ROOT.cer. Ejecuta AutoFirma una vez "
-                "para que genere su CA local.",
-            )
-            return
-
-        self.write(f"AutoFirma ROOT encontrado: {root}")
-        self.write(f"SHA-256 ROOT: {sha256_cert(root) or 'no disponible'}")
-
-        targets: list[Path] = []
-        if NSS_DIR.is_dir() and (NSS_DIR / "cert9.db").exists():
-            targets.append(NSS_DIR)
-        targets.extend(firefox_profiles())
-        targets.extend(chromium_nss_dirs())
-        targets = list(dict.fromkeys(targets))
-
-        if not targets:
-            self.write(
-                "No se encontraron almacenes NSS de navegador. "
-                "Crea/inicia el navegador y vuelve a intentarlo."
-            )
-            return
-
-        for db in targets:
-            ok, msg = trust_root_in_db(db, root)
-            self.write(("OK: " if ok else "ERROR: ") + msg)
-
-        self.write(
-            "Cierra completamente Firefox/Chromium/Chrome/Brave antes de probar "
-            "de nuevo la integración."
-        )
-
     def status(self):
         self.write("\n=== Estado de AutoFirma Fedora ===")
 
@@ -866,10 +675,14 @@ class App(QWidget):
                 + (installed if installed else "NO INSTALADA")
             )
 
-        root = find_autofirma_root()
-        self.write(f"AutoFirma ROOT: {root or 'NO ENCONTRADO'}")
-        if root:
-            self.write(f"ROOT SHA-256: {sha256_cert(root) or 'no disponible'}")
+        stores = ([NSS_DIR] if (NSS_DIR / "cert9.db").exists() else []) + firefox_profiles()
+        if not stores:
+            self.write("Almacenes NSS: ninguno encontrado")
+        elif have("certutil"):
+            for db in stores:
+                rc, out, _ = nss_certificates(db)
+                found = [n for n in nss_nicknames(out) if "autofirma" in n.lower()] if rc == 0 else []
+                self.write(f"AutoFirma en {db}: " + (", ".join(found) if found else "no hay certificado AutoFirma"))
 
         self.write(f"NSS: {'EXISTE' if NSS_DIR.exists() else 'NO EXISTE'}")
 
@@ -889,23 +702,6 @@ class App(QWidget):
                 self.write("afirma://: " + (p.stdout.strip() or "no registrado"))
             except (OSError, subprocess.SubprocessError):
                 self.write("afirma://: no se pudo consultar")
-
-    def versions(self):
-        self.run_pty(
-            "Consultar versiones oficiales de clienteafirma",
-            [
-                "bash",
-                "-lc",
-                "set -o pipefail; "
-                "command -v curl >/dev/null || { echo 'ERROR: falta curl.'; exit 1; }; "
-                "echo 'Tags recientes de clienteafirma:'; "
-                "curl --fail --location --proto '=https' --tlsv1.2 --max-time 30 "
-                "-H 'Accept: application/vnd.github+json' "
-                "'https://api.github.com/repos/ctt-gob-es/clienteafirma/tags?per_page=15' "
-                "| grep -oE '\"name\": \"v[0-9][^\"]*' "
-                "| sed -E 's/.*\"name\": \"([^\"]+).*/\\1/'",
-            ],
-        )
 
 
 def main():
