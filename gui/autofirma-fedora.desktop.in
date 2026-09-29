@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=AutoFirma · Fedora
+GenericName=Instalador de AutoFirma para Fedora
+Comment=Instalar y configurar AutoFirma en Fedora
+Exec=@GUI_LAUNCHER@
+TryExec=@GUI_LAUNCHER@
+Terminal=false
+Categories=Utility;Office;
+Keywords=AutoFirma;firma;electrónica;certificado;Fedora;
+StartupNotify=true
