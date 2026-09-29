@@ -66,7 +66,7 @@ check_java() {
     local java_bin java_version major
     java_bin=$(command -v java 2>/dev/null || true)
     [[ -n "$java_bin" ]] || die "Java no está instalado. Instala OpenJDK 17, recomendado oficialmente, y vuelve a ejecutar el instalador."
-    java_version=$(java -version 2>&1 | awk -F""" "/version/ {print \$2; exit}")
+    java_version=$(java -version 2>&1 | awk -F '"' '/version/ {print $2; exit}')
     [[ -n "$java_version" ]] || die "No se pudo determinar la versión de Java."
     if [[ "$java_version" == 1.* ]]; then major=$(printf "%s\n" "$java_version" | sed "s/^1\.//; s/\..*//"); else major=$(printf "%s\n" "$java_version" | sed "s/\..*//"); fi
     [[ "$major" =~ ^[0-9]+$ ]] || die "No se pudo interpretar la versión de Java: $java_version"
