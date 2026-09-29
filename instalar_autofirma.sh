@@ -10,6 +10,7 @@ readonly AUTOFIRMA_ZIP_NAME="Autofirma_Linux_Fedora.zip"
 readonly AUTOFIRMA_URL="https://firmaelectronica.gob.es/content/dam/firmaelectronica/descargas-software/autofirma19/Autofirma_Linux_Fedora.zip"
 readonly AUTOFIRMA_RPM_SHA256="049bccfc298cca0cbd9819b7830a7d89829888e7b3df2337a4929433d4b49aa3"
 
+ROOT_DIR=""
 WORK_DIR=""
 DOWNLOADED_ZIP=""
 RPM_FILE=""
@@ -25,6 +26,8 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+ROOT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)"
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     command -v sudo >/dev/null 2>&1 || die "Se necesitan privilegios de administrador. Instala sudo o ejecuta el script como root."
@@ -73,6 +76,50 @@ check_java() {
     (( major >= 8 )) || die "Java $java_version es demasiado antiguo. AutoFirma requiere Java 8 o superior."
     ok "Java detectado: $java_version ($java_bin)"
     if (( major >= 17 )); then ok "Java cumple la recomendación de OpenJDK 17 o superior."; else warn "Java $java_version cumple el mínimo, pero la documentación oficial recomienda OpenJDK 17."; fi
+}
+
+install_gui_system() {
+    local app_dir="/usr/share/autofirma-fedora"
+    local launcher="/usr/bin/autofirma-fedora"
+    local desktop="/usr/share/applications/autofirma-fedora.desktop"
+
+    [[ -f "$ROOT_DIR/gui/autofirma_fedora_gui.py" ]] || die "No se encuentra la GUI de AutoFirma Fedora."
+    [[ -f "$ROOT_DIR/instalar_autofirma.sh" ]] || die "No se encuentra el instalador principal."
+
+    log "Instalando la GUI de AutoFirma Fedora."
+    install -d -m 0755 "$app_dir" /usr/share/applications
+    install -m 0644 "$ROOT_DIR/gui/autofirma_fedora_gui.py" "$app_dir/autofirma_fedora_gui.py"
+    install -m 0644 "$ROOT_DIR/instalar_autofirma.sh" "$app_dir/instalar_autofirma.sh"
+
+    cat > "$launcher" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/bin/python3 /usr/share/autofirma-fedora/autofirma_fedora_gui.py "$@"
+EOF
+    chmod 0755 "$launcher"
+
+    cat > "$desktop" <<'EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=AutoFirma · Fedora
+GenericName=AutoFirma para Fedora
+Comment=Instalar y configurar AutoFirma en Fedora
+Exec=/usr/bin/autofirma-fedora
+TryExec=/usr/bin/autofirma-fedora
+Terminal=false
+Categories=Utility;Office;
+Keywords=AutoFirma;firma;electrónica;certificado;
+StartupNotify=true
+EOF
+    chmod 0644 "$desktop"
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+    fi
+
+    ok "GUI instalada: $launcher"
+    ok "Lanzador de menú instalado: $desktop"
 }
 
 check_nss_tools() {
@@ -159,6 +206,7 @@ main() {
     echo "=============================================="
     echo
     detect_os
+    install_gui_system
     detect_arch
     check_tools
     check_java
