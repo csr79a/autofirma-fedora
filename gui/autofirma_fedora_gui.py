@@ -44,7 +44,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
+_GUI_DIR = Path(__file__).resolve().parent
+_repo_root = _GUI_DIR.parent
+_system_root = Path("/usr/share/autofirma-fedora")
+ROOT = _repo_root if (_repo_root / "instalar_autofirma.sh").is_file() else _system_root
 INSTALLER = ROOT / "instalar_autofirma.sh"
 NSS_DIR = Path.home() / ".pki" / "nssdb"
 AUTOFIRMA_ROOT_NAME = "AutoFirma_ROOT.cer"
