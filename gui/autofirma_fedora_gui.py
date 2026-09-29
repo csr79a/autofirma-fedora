@@ -255,6 +255,19 @@ def find_autofirma_executable() -> str | None:
     return None
 
 
+def installed_autofirma_version() -> str | None:
+    if not have("rpm"):
+        return None
+    try:
+        p = run_capture(["rpm", "-q", "--qf", "%{VERSION}", "autofirma"])
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode:
+        return None
+    value = p.stdout.strip()
+    return value or None
+
+
 def find_autofirma_install_dir() -> Path | None:
     if not have("rpm"):
         return None
@@ -570,9 +583,24 @@ class App(QWidget):
 
     def update(self):
         self.write("\n=== Actualizar AutoFirma ===")
+        installed = installed_autofirma_version()
+        target = "1.9"
+        if installed == target:
+            self.write(
+                f"AutoFirma {installed} ya coincide con la versión fijada oficialmente ({target})."
+            )
+            self.write(
+                "No se reinstala innecesariamente. Usa «1. AutoFirma» si quieres "
+                "forzar una reinstalación."
+            )
+            return
+        if installed:
+            self.write(f"Versión instalada: {installed}")
+            self.write(f"Versión objetivo del instalador: {target}")
+        else:
+            self.write("AutoFirma no está instalada o no se pudo consultar el RPM.")
         self.write(
-            "El instalador usa la versión oficial fijada en instalar_autofirma.sh "
-            "y verifica SHA-256 antes de instalar."
+            "Se ejecutará el instalador oficial, que verifica SHA-256 antes de instalar."
         )
         self.install()
 
@@ -829,14 +857,11 @@ class App(QWidget):
         self.write(f"Directorio AutoFirma: {install_dir or 'NO ENCONTRADO'}")
 
         if have("rpm"):
-            try:
-                p = run_capture(["rpm", "-q", "autofirma"])
-                self.write(
-                    "Paquete RPM: "
-                    + (p.stdout.strip() if p.returncode == 0 else "NO INSTALADO")
-                )
-            except (OSError, subprocess.SubprocessError):
-                self.write("Paquete RPM: no se pudo consultar")
+            installed = installed_autofirma_version()
+            self.write(
+                "Versión RPM: "
+                + (installed if installed else "NO INSTALADA")
+            )
 
         root = find_autofirma_root()
         self.write(f"AutoFirma ROOT: {root or 'NO ENCONTRADO'}")
