@@ -134,7 +134,11 @@ install_rpm() {
 verify_installation() {
     local installed_version install_dir
     command -v autofirma >/dev/null 2>&1 || die "La instalación terminó, pero /usr/bin/autofirma no está disponible."
-    install_dir=$(rpm -ql autofirma | awk "/^\/usr\/lib(64)?\/AutoFirma\/?$/ {print; exit}")
+    install_dir=$(rpm -ql autofirma | awk '/^\/usr\/lib(64)?\/autofirma\/?$/ {print; exit}')
+    if [[ -z "$install_dir" ]]; then
+        [[ -d /usr/lib64/autofirma ]] && install_dir=/usr/lib64/autofirma
+        [[ -n "$install_dir" ]] || { [[ -d /usr/lib/autofirma ]] && install_dir=/usr/lib/autofirma; }
+    fi
     if [[ -z "$install_dir" ]]; then
         [[ -d /usr/lib64/AutoFirma ]] && install_dir=/usr/lib64/AutoFirma
         [[ -n "$install_dir" ]] || { [[ -d /usr/lib/AutoFirma ]] && install_dir=/usr/lib/AutoFirma; }
