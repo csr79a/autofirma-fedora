@@ -1,22 +1,20 @@
 # AutoFirma Fedora
 
-Instalador y GUI para AutoFirma en Fedora Linux usando el **paquete RPM oficial** de AutoFirma.
+Instalador y GUI para AutoFirma en Fedora Linux usando el **paquete RPM oficial** de AutoFirma 1.9.
 
-El proyecto sigue la experiencia visual y técnica de la GUI de AutoFirma para CachyOS, pero adapta la lógica de instalación y mantenimiento a Fedora.
+La aplicación no compila AutoFirma desde código fuente ni redistribuye el paquete: lo descarga del dominio oficial (`firmaelectronica.gob.es`), verifica su integridad y lo instala con `dnf`.
 
-## Objetivos
+## Qué hace
 
-- Instalar AutoFirma mediante el RPM oficial.
-- Utilizar `dnf` para dependencias e instalación.
-- Comprobar Java y herramientas NSS.
-- Mantener la integración oficial de AutoFirma (`afirma://`) proporcionada por el RPM.
-- Gestionar NSS y certificados de usuario de forma conservadora.
-- Importar certificados `.p12/.pfx` sin guardar contraseñas en archivos ni argumentos.
-- Verificar huellas digitales después de las operaciones de certificados.
-- Proporcionar una GUI PyQt6 con PTY real, consola integrada, ANSI, entrada interactiva y cancelación.
-- Separar la lógica Fedora del resto de proyectos AutoFirma.
+- Descarga `Autofirma_Linux_Fedora.zip` y verifica su **SHA-256** antes de extraerlo. Después verifica el **SHA-256 del RPM** y sus metadatos (nombre, versión, arquitectura) antes de instalarlo.
+- Instala con `dnf`, que resuelve las dependencias.
+- Comprueba que Java sea utilizable: versión mínima y **soporte gráfico (AWT/X11)**. Si el Java instalado es un paquete `-headless`, instala automáticamente el equivalente con interfaz.
+- Instala `nss-tools` y `openssl` si faltan.
+- Crea el almacén NSS del usuario (`~/.pki/nssdb`) si no existe. Si existe, no lo toca.
+- Deja la integración con el navegador (`afirma://`, certificado raíz «AutoFirma ROOT») a cargo del propio RPM oficial.
+- Ofrece una GUI PyQt6 con consola integrada (PTY real, ANSI limpiado, entrada interactiva y cancelación).
 
-## Estructura
+## Estructura del repositorio
 
 ```text
 autofirma-fedora/
@@ -28,29 +26,75 @@ autofirma-fedora/
     └── autofirma_fedora_gui.py
 ```
 
-## Estado
+Al ejecutar `instalar_autofirma.sh`, la GUI y el instalador se copian al sistema:
 
-Proyecto inicial. La estructura se está preparando antes de implementar las operaciones definitivas de instalación, actualización, NSS, certificados y navegadores.
+| Ruta | Contenido |
+|---|---|
+| `/usr/share/autofirma-fedora/` | `autofirma_fedora_gui.py` e `instalar_autofirma.sh` |
+| `/usr/bin/autofirma-fedora` | Lanzador de la GUI |
+| `/usr/share/applications/autofirma-fedora.desktop` | Entrada de menú «AutoFirma · Fedora» |
 
-La aplicación no compila AutoFirma desde código fuente: utiliza el RPM oficial publicado para Fedora.
+## Requisitos
 
-## Requisitos previstos
+- Fedora Linux (x86_64, aarch64, ppc64le o s390x; el RPM es `noarch`)
+- `dnf`, `rpm`, `curl`, `unzip`
+- Python 3.10 o superior y PyQt6 (solo para la GUI)
+- Permisos de administrador (`sudo`)
 
-- Fedora Linux
-- Python 3
-- PyQt6 para la GUI
-- Java/OpenJDK compatible con AutoFirma
-- `nss-tools`
-- `dnf`
-- permisos administrativos únicamente para las operaciones que los requieran
+Java, `nss-tools` y `openssl` se comprueban y, cuando es posible, se instalan.
 
-Las versiones y dependencias definitivas se comprobarán contra el RPM oficial antes de cerrar el instalador.
+## Uso
+
+Desde el repositorio:
+
+```bash
+git clone <URL-del-repositorio> autofirma-fedora
+cd autofirma-fedora
+bash instalar_autofirma.sh
+```
+
+Después, la GUI está en el menú («AutoFirma · Fedora») o con:
+
+```bash
+autofirma-fedora
+```
+
+### Tarjetas de la GUI
+
+| Tarjeta | Función |
+|---|---|
+| 1. Instalar / actualizar | Ejecuta el instalador (descarga, verificación e instalación del RPM) |
+| 2. Lanzar AutoFirma | Abre AutoFirma instalada |
+| 3. NSS | Crea o comprueba `~/.pki/nssdb` sin recrear ni borrar uno existente |
+| 4. Certificado | Importa un certificado personal `.p12` / `.pfx` al almacén NSS |
+| 5. Estado | Diagnóstico de Java, NSS, AutoFirma y el manejador `afirma://` |
+
+## Desinstalar
+
+```bash
+sudo dnf remove autofirma
+```
+
+El propio RPM ejecuta su desinstalador (`autofirmaConfigurador.jar -uninstall`). La GUI del proyecto se elimina borrando `/usr/share/autofirma-fedora`, `/usr/bin/autofirma-fedora` y `/usr/share/applications/autofirma-fedora.desktop`.
+
+## Avisos conocidos
+
+- **Java 25.** Fedora 44 solo ofrece `java-25-openjdk`. AutoFirma 1.9 muestra un aviso de que esa versión no está oficialmente soportada; es informativo y se puede marcar «No volver a mostrar».
+- **Firefox se cierra durante la instalación.** El `preinstall` del RPM ejecuta `pkill firefox`. Conviene cerrarlo antes.
+- **`NOKEY` en `rpm -K`.** El RPM está firmado con una clave que no está importada en el sistema. Es normal y no indica corrupción.
+
+## Estado de la verificación
+
+Probado en Fedora 44 (KDE Plasma, x86_64) con `java-25-openjdk`: descarga, verificación de huellas, instalación del RPM, creación del almacén NSS y apertura de la ventana de AutoFirma.
+
+Pendiente de validar de extremo a extremo: firma real de un documento con certificado personal y detección de AutoFirma desde el navegador con el comprobador oficial.
 
 ## Seguridad
 
-El proyecto evita almacenar contraseñas de certificados en archivos temporales o argumentos de procesos.
-
-La gestión de certificados deberá verificar la huella del certificado antes y después de operaciones sensibles y evitar reemplazar silenciosamente un certificado existente cuando su identidad no coincida.
+- La descarga se hace solo por HTTPS (TLS 1.2 o superior) desde la URL oficial fijada.
+- El ZIP y el RPM se rechazan si su SHA-256 no coincide con el fijado en el instalador.
+- La contraseña de un `.p12` nunca se pasa por línea de comandos ni se guarda en archivos temporales: se envía por `stdin`.
+- Un almacén NSS existente no se elimina, recrea ni modifica.
 
 ## Licencia
 
@@ -58,4 +102,4 @@ Consulta [LICENSE](LICENSE).
 
 ## Documentación
 
-Consulta [MANUAL.md](MANUAL.md) para la arquitectura y el procedimiento de instalación previsto.
+Consulta [MANUAL.md](MANUAL.md) para la arquitectura, el detalle del instalador y la resolución de problemas.
