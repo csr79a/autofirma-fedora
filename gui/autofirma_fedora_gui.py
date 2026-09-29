@@ -172,26 +172,29 @@ def firefox_profiles() -> list[Path]:
         if ini.is_file():
             current_path = None
             is_relative = True
-            for line in ini.read_text(errors="replace").splitlines():
-                if line.startswith("Path="):
-                    current_path = line.split("=", 1)[1].strip()
-                    is_relative = True
-                elif line.startswith("IsRelative="):
-                    is_relative = line.split("=", 1)[1].strip() != "0"
-                elif line.strip() == "" and current_path:
-                    p = Path(current_path)
-                    if is_relative:
-                        p = base / p
-                    if (p / "cert9.db").exists():
-                        result.append(p)
-                    current_path = None
 
-            if current_path:
+            def add_profile():
+                nonlocal current_path
+                if not current_path:
+                    return
                 p = Path(current_path)
                 if is_relative:
                     p = base / p
                 if (p / "cert9.db").exists():
                     result.append(p)
+                current_path = None
+
+            for line in ini.read_text(errors="replace").splitlines():
+                if line.startswith("["):
+                    add_profile()
+                    is_relative = True
+                elif line.startswith("IsRelative="):
+                    is_relative = line.split("=", 1)[1].strip() != "0"
+                elif line.startswith("Path="):
+                    add_profile()
+                    current_path = line.split("=", 1)[1].strip()
+
+            add_profile()
 
         for pattern in ("*.default", "*.default-*", "*.default-release"):
             for p in base.glob(pattern):
