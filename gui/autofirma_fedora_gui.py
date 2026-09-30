@@ -110,11 +110,13 @@ def nss_fingerprint(db: Path, nickname: str) -> str | None:
         return None
     if q.returncode:
         return None
-    return (
-        q.stdout.strip()
-        .replace("SHA256 Fingerprint=", "")
-        .replace("sha256 Fingerprint=", "")
-    )
+    return normalize_fingerprint(q.stdout)
+
+
+def normalize_fingerprint(value: str) -> str:
+    """Normaliza SHA-256 para comparar salidas de herramientas con formatos distintos."""
+    value = re.sub(r"(?i)^.*sha256 fingerprint=", "", value.strip())
+    return value.replace(":", "").replace(" ", "").upper()
 
 
 def pkcs12_fingerprint(path: Path, password: str) -> str | None:
@@ -140,11 +142,7 @@ def pkcs12_fingerprint(path: Path, password: str) -> str | None:
         except (OSError, subprocess.SubprocessError):
             continue
         if q.returncode == 0:
-            return (
-                q.stdout.strip()
-                .replace("SHA256 Fingerprint=", "")
-                .replace("sha256 Fingerprint=", "")
-            )
+            return normalize_fingerprint(q.stdout)
     return None
 
 
@@ -152,8 +150,16 @@ def firefox_profiles() -> list[Path]:
     bases = []
     xdg = os.environ.get("XDG_CONFIG_HOME")
     if xdg:
-        bases.append(Path(xdg) / "mozilla" / "firefox")
-    bases.append(Path.home() / ".mozilla" / "firefox")
+        xdg_path = Path(xdg).expanduser()
+        if xdg_path.is_absolute():
+            bases.append(xdg_path / "mozilla" / "firefox")
+    bases.extend(
+        [
+            Path.home() / ".mozilla" / "firefox",
+            # Firefox instalado como Flatpak.
+            Path.home() / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox",
+        ]
+    )
 
     result: list[Path] = []
     for base in dict.fromkeys(bases):
@@ -266,8 +272,12 @@ class PtyRunner:
         if self.pid == 0:
             try:
                 os.execvp(self.command[0], self.command)
-            finally:
-                os._exit(127)  # nunca volver al código Qt del proceso hijo
+            except OSError as exc:
+                try:
+                    os.write(self.fd, f"\r\nERROR al ejecutar {self.command[0]}: {exc}\r\n".encode())
+                except OSError:
+                    pass
+                os._exit(127)
         os.set_blocking(self.fd, False)
 
     def _drain(self):
@@ -305,12 +315,29 @@ class PtyRunner:
     def cancel(self):
         if not self.pid:
             return
+
         now = time.monotonic()
-        sig = signal.SIGKILL if now - self.last_cancel < 0.8 else signal.SIGINT
-        try:
-            os.kill(self.pid, sig)
-        except OSError:
-            pass
+        if now - self.last_cancel < 0.8:
+            try:
+                os.killpg(self.pid, signal.SIGKILL)
+            except OSError:
+                try:
+                    os.kill(self.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        else:
+            # Equivale a Ctrl+C en el PTY y permite que bash/dnf limpie
+            # normalmente antes de recurrir a SIGKILL.
+            try:
+                os.write(self.fd, b"\x03")
+            except OSError:
+                try:
+                    os.killpg(self.pid, signal.SIGINT)
+                except OSError:
+                    try:
+                        os.kill(self.pid, signal.SIGINT)
+                    except OSError:
+                        pass
         self.last_cancel = now
 
     def finish(self, code: int):
@@ -640,12 +667,36 @@ class App(QWidget):
             self.write("ERROR al importar: " + (p.stderr or p.stdout).strip())
             return
 
-        self.write("Certificado importado correctamente.")
         rc, out, err = nss_certificates(NSS_DIR)
-        if rc == 0:
-            self.write(out.strip())
-        else:
+        if rc:
+            self.write("ERROR: la importación terminó, pero no se pudo volver a abrir el almacén NSS.")
             self.write(err.strip())
+            return
+
+        if fingerprint:
+            imported_nicknames = nss_nicknames(out)
+            verified = [
+                nickname
+                for nickname in imported_nicknames
+                if nss_fingerprint(NSS_DIR, nickname) == fingerprint
+            ]
+            if not verified:
+                self.write(
+                    "ERROR: pk12util terminó correctamente, pero la huella SHA-256 "
+                    "del certificado importado no coincide con la del archivo de origen."
+                )
+                return
+            self.write(
+                "Certificado importado y verificado por SHA-256 en NSS como: "
+                + ", ".join(f"«{nickname}»" for nickname in verified)
+            )
+        else:
+            self.write(
+                "ADVERTENCIA: certificado importado, pero no se pudo calcular la "
+                "huella SHA-256 de origen; no fue posible realizar la verificación posterior."
+            )
+
+        self.write(out.strip() or "Importación verificada correctamente.")
 
     def password_dialog(self, title: str, label: str):
         return QInputDialog.getText(
@@ -709,7 +760,18 @@ def main():
         print("Se requiere Python 3.10 o superior.", file=sys.stderr)
         raise SystemExit(1)
 
+    if os.geteuid() == 0:
+        print(
+            "La GUI no debe ejecutarse como root. Iníciala como usuario normal "
+            "para acceder a tu almacén NSS y a tus perfiles de Firefox.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
     app = QApplication(sys.argv)
+    app.setApplicationName("AutoFirma Fedora")
+    app.setOrganizationName("AutoFirma Fedora")
+    app.setDesktopFileName("autofirma-fedora")
     window = App()
     window.show()
     raise SystemExit(app.exec())
