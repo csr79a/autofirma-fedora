@@ -70,7 +70,31 @@ check_tools() {
 check_java() {
     local java_bin java_version major
     java_bin=$(command -v java 2>/dev/null || true)
-    [[ -n "$java_bin" ]] || die "Java no está instalado. Instala OpenJDK 17, recomendado oficialmente, y vuelve a ejecutar el instalador."
+
+    if [[ -z "$java_bin" ]]; then
+        local java_pkg=""
+        local candidate
+        for candidate in java-17-openjdk java-21-openjdk java-25-openjdk java-latest-openjdk; do
+            if dnf -q repoquery --available --qf "%{name}" "$candidate" 2>/dev/null | grep -qx "$candidate"; then
+                java_pkg="$candidate"
+                break
+            fi
+        done
+        [[ -n "$java_pkg" ]] || die "Java no está instalado y no se encontró un OpenJDK disponible en los repositorios."
+        warn "Java no está instalado. AutoFirma requiere Java 8 o superior; la documentación oficial recomienda Java 17."
+        if [[ ! -t 0 ]]; then
+            die "No hay una terminal interactiva para confirmar la instalación de $java_pkg. Instálalo manualmente y vuelve a ejecutar el instalador."
+        fi
+        local answer=""
+        read -r -p "¿Quieres instalar $java_pkg ahora? [S/n]: " answer </dev/tty || true
+        case "$answer" in
+            [Nn]|[Nn][Oo]) die "Java es necesario para continuar." ;;
+        esac
+        log "Instalando $java_pkg..."
+        dnf install -y "$java_pkg"
+        java_bin=$(command -v java 2>/dev/null || true)
+        [[ -n "$java_bin" ]] || die "Java se instaló, pero el comando java sigue sin estar disponible."
+    fi
     java_version=$(java -version 2>&1 | awk -F '"' '/version/ {print $2; exit}')
     [[ -n "$java_version" ]] || die "No se pudo determinar la versión de Java."
     if [[ "$java_version" == 1.* ]]; then major=$(printf "%s\n" "$java_version" | sed "s/^1\.//; s/\..*//"); else major=$(printf "%s\n" "$java_version" | sed "s/\..*//"); fi
@@ -241,6 +265,9 @@ verify_rpm_sha256() {
 
 verify_rpm_metadata() {
     local name version arch
+    # --nosignature no verifica una firma GPG: solo valida que el archivo sea un RPM
+    # estructuralmente válido. La integridad/autenticidad de esta descarga se basa
+    # en el SHA-256 fijado y verificado antes de llegar a este punto.
     rpm -K --nosignature "$RPM_FILE" >/dev/null 2>&1 || die "El archivo descargado no es un RPM válido."
     name=$(rpm -qp --qf "%{NAME}" "$RPM_FILE")
     version=$(rpm -qp --qf "%{VERSION}" "$RPM_FILE")
@@ -253,11 +280,40 @@ verify_rpm_metadata() {
 
 install_rpm() {
     if command -v pgrep >/dev/null 2>&1 && pgrep -x firefox >/dev/null 2>&1; then
-        warn "Firefox está abierto: el scriptlet del RPM lo cerrará (pkill firefox) durante la instalación."
+        warn "Firefox está abierto. El scriptlet del RPM puede cerrarlo con pkill firefox durante la instalación."
+        if [[ -t 0 || -e /dev/tty ]]; then
+            local answer=""
+            read -r -p "Cierra Firefox y pulsa Enter para continuar, o escribe N para cancelar [S/n]: " answer </dev/tty || true
+            case "$answer" in
+                [Nn]|[Nn][Oo]) die "Instalación cancelada para no cerrar Firefox sin tu consentimiento." ;;
+            esac
+            if pgrep -x firefox >/dev/null 2>&1; then
+                warn "Firefox sigue abierto. Se continuará porque has confirmado; el RPM puede terminar sus procesos."
+            fi
+        else
+            die "Firefox está abierto y no hay una terminal interactiva para confirmar su cierre. Cierra Firefox y vuelve a ejecutar el instalador."
+        fi
     fi
     log "Instalando AutoFirma mediante dnf."
     dnf install -y "$RPM_FILE"
     ok "dnf terminó la instalación de AutoFirma."
+}
+
+verify_xdg_mime() {
+    if ! command -v xdg-mime >/dev/null 2>&1; then
+        warn "No se encontró xdg-mime; no se puede comprobar el manejador afirma://."
+        return 0
+    fi
+
+    local handler
+    handler=$(xdg-mime query default x-scheme-handler/afirma 2>/dev/null || true)
+    if [[ -n "$handler" ]]; then
+        ok "Manejador afirma:// registrado: $handler"
+    else
+        warn "El RPM se instaló, pero xdg-mime no devuelve ningún manejador para afirma://."
+        warn "La integración del navegador puede no estar disponible. Puedes repetir:"
+        warn "sudo java -Djava.awt.headless=true -jar /usr/lib64/autofirma/autofirmaConfigurador.jar -install"
+    fi
 }
 
 verify_installation() {
@@ -302,6 +358,7 @@ main() {
     verify_rpm_metadata
     install_rpm
     verify_installation
+    verify_xdg_mime
     install_gui_system
     echo
     echo "Instalación completada mediante el RPM oficial."
