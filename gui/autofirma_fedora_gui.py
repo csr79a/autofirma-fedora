@@ -329,6 +329,8 @@ class PtyRunner:
             # Equivale a Ctrl+C en el PTY y permite que bash/dnf limpie
             # normalmente antes de recurrir a SIGKILL.
             try:
+                if self.fd is None:
+                    raise OSError("PTY cerrado")
                 os.write(self.fd, b"\x03")
             except OSError:
                 try:
