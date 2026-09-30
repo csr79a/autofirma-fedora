@@ -73,8 +73,8 @@ Se puede ejecutar como usuario normal: se reejecuta con `sudo bash`. Orden de pa
 8. **Verificación del ZIP**: SHA-256 contra la huella fijada. Si falla, no se extrae nada.
 9. **Extracción**: el ZIP debe contener exactamente un RPM, con el nombre esperado.
 10. **Verificación del RPM**: SHA-256 y metadatos (`name=autofirma`, `version=1.9`, `arch=noarch`).
-11. **Instalación**: `dnf install -y` del RPM. Avisa si Firefox está abierto.
-12. **Comprobación final**: ejecutable en `/usr/bin`, directorio de instalación y paquete registrado en `rpm`.
+11. **Instalación**: antes de `dnf install -y`, detecta Firefox abierto y pide confirmación. Esto es necesario porque el `preinstall` del RPM puede ejecutar `pkill firefox`.
+12. **Comprobación final**: ejecutable en `/usr/bin`, directorio de instalación, paquete registrado en `rpm` y manejador `afirma://` mediante `xdg-mime`.
 13. **GUI**: copia la GUI y el instalador a `/usr/share/autofirma-fedora/`, crea `/usr/bin/autofirma-fedora` y la entrada de menú.
 
 La GUI se instala al final, después de verificar el RPM.
@@ -89,11 +89,11 @@ Cinco tarjetas:
 4. **Certificado**: importa un `.p12` / `.pfx` personal.
 5. **Estado**: Java, `certutil`, `pk12util`, `openssl`, `xdg-mime`, `rpm`, `dnf`, ejecutable y directorio de AutoFirma, versión del RPM, certificados «AutoFirma» presentes en los almacenes NSS y manejador `afirma://`.
 
-La consola integrada usa un PTY real. Limpia las secuencias ANSI, admite entrada interactiva (el campo pasa a modo contraseña cuando el proceso la pide, como en el `sudo`) y cancelación (una pulsación envía `SIGINT`; una segunda en menos de un segundo, `SIGKILL`). El código de salida que se muestra es el real del proceso.
+La consola integrada usa un PTY real. Limpia las secuencias ANSI y admite entrada interactiva. La primera cancelación escribe `\x03` en el PTY, equivalente a Ctrl+C; si el proceso no termina inmediatamente, la siguiente cancelación mata el grupo de procesos completo. El código de salida que se muestra es el real del proceso.
 
 ## 6. NSS y certificados
 
-Ruta del almacén: `~/.pki/nssdb` (formato `sql:`, `cert9.db`). Se trata de forma conservadora: **no se elimina, recrea ni modifica** un almacén existente.
+Ruta del almacén: `~/.pki/nssdb` (formato `sql:`, `cert9.db`). La detección de Firefox contempla `XDG_CONFIG_HOME`, `~/.mozilla/firefox` y el perfil de Firefox Flatpak en `~/.var/app/org.mozilla.firefox/.mozilla/firefox`. Se trata de forma conservadora: **no se elimina, recrea ni modifica** un almacén existente.
 
 `certutil -N` **no crea el directorio** del almacén: hay que crearlo antes, o falla con `SEC_ERROR_BAD_DATABASE`. Tanto el instalador como la tarjeta NSS lo hacen.
 
@@ -103,7 +103,7 @@ Ruta del almacén: `~/.pki/nssdb` (formato `sql:`, `cert9.db`). Se trata de form
 2. Cálculo de la huella SHA-256 del certificado con `openssl pkcs12`. Si falla, reintenta con `-legacy`, necesario con OpenSSL 3 para archivos antiguos (por ejemplo, con RC2-40, habituales en certificados emitidos hace años). Si no consigue la huella, avisa y sigue, porque `pk12util` es quien valida realmente el archivo.
 3. Si la huella ya existe en el almacén con cualquier nickname (incluidos los que llevan espacios), no se vuelve a importar.
 4. Importación con `pk12util -w /dev/stdin`: la contraseña viaja por `stdin`, nunca por argumentos ni por archivos temporales.
-5. Al terminar se muestra el listado del almacén. La verificación por huella posterior a la importación no está implementada.
+5. Tras `pk12util`, se vuelve a abrir el almacén NSS, se recalculan las huellas SHA-256 y se comprueba que el certificado importado coincide con la huella del archivo de origen. Si no coincide, la GUI informa de un fallo de verificación.
 
 ## 7. Java
 
@@ -123,7 +123,7 @@ Ruta del almacén: `~/.pki/nssdb` (formato `sql:`, `cert9.db`). Se trata de form
   No se ha podido confirmar que el organismo publique huellas oficiales; estas se han calculado a partir de la descarga desde el dominio oficial. Si en el futuro el archivo se republica, la verificación fallará hasta actualizarlas.
 - **Firma del RPM**: `rpm -K` muestra `NOKEY` porque la clave PGP (`gpg_sgad_publickey.asc`, incluida en el ZIP) no está importada. El instalador usa `rpm -K --nosignature` solo para comprobar que el archivo es un RPM válido; la integridad se apoya en las huellas fijadas.
 - **Sin sustitución silenciosa**: no se sustituye un certificado existente si su identidad no coincide.
-- **TLS**: la descarga usa `--proto '=https' --tlsv1.2` y no se desactiva la verificación de certificados.
+- **TLS**: la descarga usa `--proto '=https' --tlsv1.2` y no se desactiva la verificación de certificados. No se añade un fallback TLS inseguro.
 - **Contraseñas**: no se guardan en disco ni en la línea de comandos.
 
 ### Actualizar a una nueva versión de AutoFirma
